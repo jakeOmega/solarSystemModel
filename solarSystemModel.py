@@ -2,15 +2,18 @@ from tkinter import *
 import thread
 
 #global contants
-G = 1.184*10**-4        #AU^3/Earth mass/year^2
-drawTime = 1000/60      #How often (in ms) to refresh the screen
-initRunTime = 10        #How often to advance by one timestep in the simulation initially
-initWidth = 800         #default view width
-initHeight = 600        #default view height
-moveAmount = 10.0       #how many pixels to move when hitting move buttons
-zoomAmount = 1.1        #how much to zoom in/out by
-speedChangeAmount = 1.5 #how much to speed up/slow down simulation per button press
-buttonSize = 3          #How big to make the buttons
+G = 1.184*10**-4        # AU^3/Earth mass/year^2
+drawTime = 1000/60      # How often (in ms) to refresh the screen
+initRunTime = 40        # How often to advance by one timestep in the simulation initially
+initWidth = 800         # default view width
+initHeight = 600        # default view height
+moveAmount = 10.0       # how many pixels to move when hitting move buttons
+zoomAmount = 1.1        # how much to zoom in/out by
+speedChangeAmount = 1.5 # how much to speed up/slow down simulation per button press
+buttonSize = 3          # How big to make the buttons
+pixelToVelocity = 0.01  # Conversion factor between arrow length and world velocity
+newWorldMass = 10       # mass (in earth masses) of user-added worlds
+newWorldSize = 0.05     # size (in AU) of user-added worlds
 
 
 class world:
@@ -40,6 +43,7 @@ class world:
         self.image = master.canvas.create_oval(x - size, y - size, 
                                                x + size, y + size,
                                                fill="blue")
+        self.fixed = False
 
     def step(self, dt):
         '''
@@ -48,8 +52,9 @@ class world:
         Args:
             dt (float): The duration of the time step in years
         '''
-        self.x += self.vx*dt
-        self.y += self.vy*dt
+        if not self.fixed:
+            self.x += self.vx*dt
+            self.y += self.vy*dt
 
     def grav(self, other, dt):
         '''
@@ -59,12 +64,29 @@ class world:
             other (world): The world exerting a gravitational force upon this world
             dt (float): The duration of the force in years
         '''
+        if not self.fixed and not other.fixed:
+            dist = ( (self.x - other.x)**2 + (self.y - other.y)**2 )**0.5
+            accl = -G * other.m / dist**2
+            acclX = (self.x - other.x) * accl / dist
+            acclY = (self.y - other.y) * accl / dist
+            self.vx += acclX * dt
+            self.vy += acclY * dt
+
+    def collide(self, other):
+        '''
+        Check if two worlds collide. Returns true if they have collided, otherwise returns false.
+
+        Args:
+            other (world): the other world to check if we collided with.
+
+        Returns:
+            Boolean, whether we collided.
+        '''
         dist = ( (self.x - other.x)**2 + (self.y - other.y)**2 )**0.5
-        accl = -G * other.m / dist**2
-        acclX = (self.x - other.x) * accl / dist
-        acclY = (self.y - other.y) * accl / dist
-        self.vx += acclX * dt
-        self.vy += acclY * dt
+        if dist < self.size + other.size:
+            return True
+        else:
+            return False
 
     def updateDraw(self, cameraPos, scale):
         '''
@@ -92,6 +114,12 @@ class world:
         self.master.tracked = self
         self.master.cameraPos = (self.x, self.y)
 
+    def delete(self):
+        '''
+        Stops drawing of this world
+        '''
+        self.master.canvas.delete(self.image)
+
 
 class system:
     '''
@@ -109,7 +137,7 @@ class system:
         self.master = master
         self.worlds = worlds
         self.cameraPos = (0, 0)
-        self.scale = 1
+        self.scale = 1.0
         self.runTime = initRunTime
         self.tracked = None
         self.canvas = Canvas(root, width=initWidth, 
@@ -118,13 +146,18 @@ class system:
         self.play = True
         self.dt = dt
         self.dt_init = dt
+        self.velocityLine = None
+        self.newWorld = None
 
     def initialize(self):
         '''
         Set up events handling click-and-drag movement and clicking on world objects
         '''
-        self.canvas.bind('<Button-1>', self.mouseDown)
-        self.canvas.bind('<B1-Motion>', self.mouseMove)
+        self.canvas.bind('<Button-1>', self.mouseLeftDown)
+        self.canvas.bind('<B1-Motion>', self.mouseLeftMove)
+        self.canvas.bind('<Button-3>', self.mouseRightDown)
+        self.canvas.bind('<B3-Motion>', self.mouseRightMove)
+        self.canvas.bind('<ButtonRelease-3>', self.mouseRightUp)
         for w in self.worlds:
             self.canvas.tag_bind(w.image, '<Button-1>',  w.onWorldClick)
 
@@ -162,17 +195,39 @@ class system:
 
     def pushWorlds(self):
         '''
-        Applies graviational forces pairwise to all world objects and advances their
+        Applies graviational forces pairwise to all world objects, performs stupid (O(n^2) collision
+        detection pairwise (few enough objects it doesn't matter), and advances their
         location by one time step.
         '''
+        newWorldList = []
+        deleteWorldList = []
         for firstWorldNum in range(len(self.worlds)):
             firstWorld = self.worlds[firstWorldNum]
             for secondWorldNum in range(firstWorldNum + 1, len(self.worlds)):
                 secondWorld = self.worlds[secondWorldNum]
-                firstWorld.grav(secondWorld, self.dt)
-                secondWorld.grav(firstWorld, self.dt)
+                #Stupid O(n^2) collision detection, but few enough objects that it doesn't matter
+                if (firstWorld not in deleteWorldList 
+                    and secondWorld not in deleteWorldList 
+                    and firstWorld.collide(secondWorld)):
+                    newM = firstWorld.m + secondWorld.m
+                    newX = (firstWorld.x * firstWorld.m + secondWorld.x * secondWorld.m)/newM
+                    newY = (firstWorld.y * firstWorld.m + secondWorld.y * secondWorld.m)/newM
+                    newVX = (firstWorld.vx * firstWorld.m + secondWorld.vx * secondWorld.m)/newM
+                    newVY = (firstWorld.vy * firstWorld.m + secondWorld.vy * secondWorld.m)/newM
+                    newWorld = world(self, newM, newX, newY, newVX, newVY, (firstWorld.size**2 + secondWorld.size**2)**0.5)
+                    deleteWorldList += [firstWorld, secondWorld]
+                    firstWorld.delete()
+                    secondWorld.delete()
+                    newWorldList = [newWorld]
+                else:
+                    firstWorld.grav(secondWorld, self.dt)
+                    secondWorld.grav(firstWorld, self.dt)
         for w in self.worlds:
             w.step(self.dt)
+        for w in deleteWorldList:
+            self.worlds.remove(w)
+        for w in newWorldList:
+            self.worlds += [w]
         
 
     def updateWorlds(self):
@@ -310,22 +365,52 @@ class system:
         else:
             pauseButton.config(relief = SUNKEN)
     
-    def mouseDown(self, event):
+    def mouseLeftDown(self, event):
         '''
         Handles mouse presses for click-and-drag movement
         '''
-        self.mouseDown = (event.x, event.y)
+        self.mouseLeftDown = (event.x, event.y)
         self.oldCamPos = self.cameraPos
 
-    def mouseMove(self, event):
+    def mouseLeftMove(self, event):
         '''
         Handles mouse movements for click-and-drag movement
         '''
-        mouseChange = (event.x - self.mouseDown[0], event.y - self.mouseDown[1])
+        mouseChange = (event.x - self.mouseLeftDown[0], event.y - self.mouseLeftDown[1])
         self.cameraPos = (self.oldCamPos[0] - 1.0*mouseChange[0]/self.scale, 
                           self.oldCamPos[1] - 1.0*mouseChange[1]/self.scale)
         self.tracked = None
 
+    def mouseRightDown(self, event):
+        '''
+        Handles the addition of a new world by user right-click
+        '''
+        if self.velocityLine is None:
+            self.mouseRightDown = (event.x, event.y)
+            self.velocityLine = self.canvas.create_line(event.x, event.y, event.x, event.y, arrow=LAST, fill='red')
+            newWorldPos = self.drawToReal(event.x, event.y)
+            self.newWorld = world(self, newWorldMass, newWorldPos[0], newWorldPos[1], 0, 0, newWorldSize)
+            self.newWorld.fixed = True
+            self.worlds += [self.newWorld]
+
+    def mouseRightMove(self, event):
+        '''
+        Draws an arrow indicating new world velocity when user moves mouse after right clicking
+        '''
+        if self.velocityLine is not None:
+            self.canvas.coords(self.velocityLine, self.mouseRightDown[0], self.mouseRightDown[1],
+                               event.x, event.y)
+
+    def mouseRightUp(self, event):
+        '''
+        Allows newly added world to move and removes arrow.
+        '''
+        self.canvas.delete(self.velocityLine)
+        self.velocityLine = None
+        self.newWorld.vx = pixelToVelocity * (event.x - self.mouseRightDown[0])
+        self.newWorld.vy = pixelToVelocity * (event.y - self.mouseRightDown[1])
+        self.newWorld.fixed = False
+        self.newWorld = None
 
 class systemApp:
     '''
@@ -342,10 +427,9 @@ class systemApp:
         sys.worlds = [world(sys, 333000, 0, 0, 0, 0.262, 0.5), 
                       world(sys, 318, 1.3, 0, 0, 5.5, 0.075),
                       world(sys, 31800, 5.2, 0, 0, -2.75, 0.15), 
-                      world(sys, 0.025, 5.2+0.7155, 0, 0, -2.75+2.294, 0.05),
-                      world(sys, 0.025, 7, 0, 0, -0.9, 0.05)]
+                      world(sys, 0.025, 5.2+0.7155, 0, 0, -2.75+2.294, 0.05)]
         sys.cameraPos = (-0.0, -0.0)
-        sys.scale = 50
+        sys.scale = 50.0
         sys.initialize()
 
         frame = Frame(root)
